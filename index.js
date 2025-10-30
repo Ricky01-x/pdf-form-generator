@@ -12,17 +12,16 @@ app.get('/', (req, res) => {
   res.json({ 
     status: 'ok', 
     service: 'PDF Form Generator',
-    version: '2.0.0',
+    version: '2.1.0',
     features: [
-      'Multi-field per line',
+      'Accurate multi-field positioning',
       'Multiline text merging',
       'Checkbox detection',
-      'Signature field detection'
+      'Improved coordinate calculation'
     ],
     endpoints: {
       health: 'GET /',
       detectUnderscores: 'POST /detect-underscores',
-      createFormFields: 'POST /create-form-fields',
       fullProcess: 'POST /process'
     }
   });
@@ -58,7 +57,28 @@ function getCharWidth(fontName, fontSize) {
   return fontSize * factor;
 }
 
-// === 改進 1: 智能下劃線分段（一行多欄位） ===
+// === 改進：精確計算字符位置 ===
+function calculateCharacterPositions(text, startX, fontName, fontSize) {
+  const positions = [];
+  const charWidth = getCharWidth(fontName, fontSize);
+  let currentX = startX;
+  
+  for (let i = 0; i < text.length; i++) {
+    positions.push(currentX);
+    
+    // 不同字符可能有不同寬度，但我們用平均值
+    // 特殊處理：空格
+    if (text[i] === ' ') {
+      currentX += charWidth * 0.3; // 空格較窄
+    } else {
+      currentX += charWidth;
+    }
+  }
+  
+  return positions;
+}
+
+// === 改進：智能下劃線分段 ===
 function findUnderscoreSegments(text, minLength = 3) {
   const segments = [];
   let inUnderscore = false;
@@ -75,8 +95,9 @@ function findUnderscoreSegments(text, minLength = 3) {
     } else {
       consecutiveNonUnderscore++;
       
-      // 智能斷點：超過 3 個非下劃線字符 = 新段落
-      if (inUnderscore && consecutiveNonUnderscore >= 3) {
+      // 斷點檢測：超過 2 個非下劃線字符 = 新段落
+      // 降低閾值讓分段更敏感
+      if (inUnderscore && consecutiveNonUnderscore >= 2) {
         inUnderscore = false;
         
         const length = i - consecutiveNonUnderscore - startIndex;
@@ -108,11 +129,10 @@ function findUnderscoreSegments(text, minLength = 3) {
   return segments;
 }
 
-// === 改進 3: Checkbox/Radio 識別 ===
+// === Checkbox 識別 ===
 function detectCheckboxes(text) {
   const checkboxes = [];
   
-  // Checkbox 模式
   const checkboxPatterns = [
     { regex: /☐/g, type: 'checkbox' },
     { regex: /□/g, type: 'checkbox' },
@@ -135,29 +155,7 @@ function detectCheckboxes(text) {
   return checkboxes;
 }
 
-// === 改進 4: 簽名欄位識別 ===
-function detectSignatureFields(text, context) {
-  const combined = (text + ' ' + context.before + ' ' + context.after).toLowerCase();
-  
-  const signatureKeywords = [
-    'signature',
-    'sign here',
-    'signed',
-    'signatory',
-    'initial',
-    'initials'
-  ];
-  
-  for (const keyword of signatureKeywords) {
-    if (combined.includes(keyword)) {
-      return true;
-    }
-  }
-  
-  return false;
-}
-
-// === 改進 2: 跨行文字合併 ===
+// === 跨行文字合併 ===
 function mergeMultilineElements(elements) {
   const merged = [];
   let currentMerge = null;
@@ -165,7 +163,6 @@ function mergeMultilineElements(elements) {
   for (let i = 0; i < elements.length; i++) {
     const element = elements[i];
     
-    // 跳過空元素
     if (!element.Text || typeof element.Text !== 'string') {
       if (currentMerge) {
         merged.push(currentMerge);
@@ -174,7 +171,6 @@ function mergeMultilineElements(elements) {
       continue;
     }
     
-    // 只合併包含下劃線或 checkbox 的元素
     const hasUnderscore = element.Text.includes('_');
     const hasCheckbox = /[☐□\[\]\(\)]/.test(element.Text);
     
@@ -186,40 +182,26 @@ function mergeMultilineElements(elements) {
       continue;
     }
     
-    // 檢查是否可以與前一個元素合併
     if (currentMerge && element.Page === currentMerge.Page) {
       const prevBounds = currentMerge.Bounds;
       const currBounds = element.Bounds;
       
-      // Y 座標差異（垂直距離）
       const yDiff = Math.abs(currBounds[1] - prevBounds[1]);
-      
-      // X 座標間隔（水平距離）
       const xGap = currBounds[0] - prevBounds[2];
       
-      // 合併條件：
-      // 1. 垂直距離 < 20（同一段落或相鄰行）
-      // 2. 水平間隔 < 100（文字連續或合理間隔）
-      // 3. X 間隔不是負數（不重疊）
       if (yDiff < 20 && xGap >= 0 && xGap < 100) {
-        // 合併文字
         currentMerge.Text += ' ' + element.Text;
-        
-        // 擴展邊界
-        currentMerge.Bounds[2] = currBounds[2]; // 右邊界
-        currentMerge.Bounds[3] = Math.max(prevBounds[3], currBounds[3]); // 下邊界
-        currentMerge.Bounds[1] = Math.min(prevBounds[1], currBounds[1]); // 上邊界
-        
+        currentMerge.Bounds[2] = currBounds[2];
+        currentMerge.Bounds[3] = Math.max(prevBounds[3], currBounds[3]);
+        currentMerge.Bounds[1] = Math.min(prevBounds[1], currBounds[1]);
         continue;
       }
     }
     
-    // 無法合併，保存當前合併項
     if (currentMerge) {
       merged.push(currentMerge);
     }
     
-    // 開始新的合併
     currentMerge = {
       Text: element.Text,
       Bounds: [...element.Bounds],
@@ -229,7 +211,6 @@ function mergeMultilineElements(elements) {
     };
   }
   
-  // 保存最後一個
   if (currentMerge) {
     merged.push(currentMerge);
   }
@@ -254,11 +235,7 @@ function guessFieldType(context, text = '') {
   const afterLower = context.after.toLowerCase();
   const combined = (beforeLower + ' ' + afterLower + ' ' + text).toLowerCase();
   
-  // 簽名欄位優先級最高
-  if (combined.includes('signature') || combined.includes('sign here') || 
-      combined.includes('signed') || combined.includes('initial')) {
-    return 'signature';
-  }
+  // 移除簽名欄位自動識別
   
   if (combined.includes('date') || combined.includes('day') || 
       combined.includes('month') || combined.includes('year')) {
@@ -275,9 +252,6 @@ function guessFieldType(context, text = '') {
 }
 
 function generateFieldName(context, index, fieldType) {
-  if (fieldType === 'signature') {
-    return `signature_${index}`;
-  }
   if (fieldType === 'checkbox' || fieldType === 'radio') {
     return `${fieldType}_${index}`;
   }
@@ -293,120 +267,6 @@ function generateFieldName(context, index, fieldType) {
 }
 
 // === API 端點 ===
-
-app.post('/detect-underscores', async (req, res) => {
-  try {
-    const { extract_elements } = req.body;
-    
-    if (!extract_elements || !Array.isArray(extract_elements)) {
-      return res.status(400).json({ error: 'extract_elements array is required' });
-    }
-    
-    console.log(`\n=== Detecting Form Fields ===`);
-    console.log(`Total elements: ${extract_elements.length}`);
-    
-    // Step 1: 合併跨行元素
-    const mergedElements = mergeMultilineElements(extract_elements);
-    
-    const fillableAreas = [];
-    let fieldIndex = 1;
-    
-    for (const element of mergedElements) {
-      const text = element.Text;
-      const bounds = element.Bounds;
-      const page = element.Page || 0;
-      const fontSize = element.Font?.size || element.TextSize || 12;
-      const fontName = element.Font?.name || element.Font?.family_name || 'Arial';
-      
-      const charWidth = getCharWidth(fontName, fontSize);
-      
-      // Step 2: 檢測 Checkbox/Radio
-      const checkboxes = detectCheckboxes(text);
-      
-      for (const checkbox of checkboxes) {
-        const startX = bounds[0] + (checkbox.index * charWidth);
-        const size = fontSize * 0.9;
-        
-        fillableAreas.push({
-          id: fieldIndex,
-          field_name: `${checkbox.type}_${fieldIndex}`,
-          page: page,
-          x: startX,
-          y: bounds[1],
-          width: size,
-          height: size,
-          field_type: checkbox.type,
-          context: {
-            before: text.substring(Math.max(0, checkbox.index - 50), checkbox.index),
-            after: text.substring(checkbox.index + checkbox.symbol.length, Math.min(text.length, checkbox.index + 100)),
-            full: text
-          },
-          font_size: fontSize
-        });
-        
-        fieldIndex++;
-      }
-      
-      // Step 3: 檢測下劃線（文字欄位）
-      if (text.includes('_')) {
-        const segments = findUnderscoreSegments(text);
-        
-        for (const segment of segments) {
-          const startX = bounds[0] + (segment.startIndex * charWidth);
-          const width = segment.length * charWidth;
-          const context = getContext(text, segment.startIndex, segment.endIndex);
-          
-          // 檢查是否為簽名欄位
-          const isSignature = detectSignatureFields(text, context);
-          const fieldType = isSignature ? 'signature' : guessFieldType(context, text);
-          
-          fillableAreas.push({
-            id: fieldIndex,
-            field_name: generateFieldName(context, fieldIndex, fieldType),
-            page: page,
-            x: startX,
-            y: bounds[1],
-            width: width,
-            height: bounds[3] - bounds[1],
-            underscore_length: segment.length,
-            context: context,
-            field_type: fieldType,
-            font_size: fontSize * 0.7,
-            original_text: text
-          });
-          
-          fieldIndex++;
-        }
-      }
-    }
-    
-    console.log(`\n=== Detection Complete ===`);
-    console.log(`Total fillable areas: ${fillableAreas.length}`);
-    console.log(`- Text fields: ${fillableAreas.filter(f => f.field_type === 'text').length}`);
-    console.log(`- Signature fields: ${fillableAreas.filter(f => f.field_type === 'signature').length}`);
-    console.log(`- Checkboxes: ${fillableAreas.filter(f => f.field_type === 'checkbox').length}`);
-    console.log(`- Radio buttons: ${fillableAreas.filter(f => f.field_type === 'radio').length}`);
-    
-    res.json({
-      success: true,
-      total_areas: fillableAreas.length,
-      fillable_areas: fillableAreas,
-      statistics: {
-        text_fields: fillableAreas.filter(f => !['checkbox', 'radio', 'signature'].includes(f.field_type)).length,
-        signature_fields: fillableAreas.filter(f => f.field_type === 'signature').length,
-        checkboxes: fillableAreas.filter(f => f.field_type === 'checkbox').length,
-        radio_buttons: fillableAreas.filter(f => f.field_type === 'radio').length
-      }
-    });
-    
-  } catch (error) {
-    console.error('Error detecting form fields:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
 
 app.post('/process', async (req, res) => {
   try {
@@ -438,13 +298,16 @@ app.post('/process', async (req, res) => {
       const fontSize = element.Font?.size || element.TextSize || 12;
       const fontName = element.Font?.name || element.Font?.family_name || 'Arial';
       
+      // === 關鍵改進：計算每個字符的精確位置 ===
+      const charPositions = calculateCharacterPositions(text, bounds[0], fontName, fontSize);
       const charWidth = getCharWidth(fontName, fontSize);
       
       // 檢測 Checkbox/Radio
       const checkboxes = detectCheckboxes(text);
       
       for (const checkbox of checkboxes) {
-        const startX = bounds[0] + (checkbox.index * charWidth);
+        // 使用精確的字符位置
+        const startX = charPositions[checkbox.index] || bounds[0];
         const size = fontSize * 0.9;
         
         fillableAreas.push({
@@ -472,12 +335,13 @@ app.post('/process', async (req, res) => {
         const segments = findUnderscoreSegments(text);
         
         for (const segment of segments) {
-          const startX = bounds[0] + (segment.startIndex * charWidth);
-          const width = segment.length * charWidth;
-          const context = getContext(text, segment.startIndex, segment.endIndex);
+          // === 關鍵改進：使用精確的字符位置 ===
+          const startX = charPositions[segment.startIndex] || bounds[0];
+          const endX = charPositions[segment.endIndex] || (startX + segment.length * charWidth);
+          const width = endX - startX;
           
-          const isSignature = detectSignatureFields(text, context);
-          const fieldType = isSignature ? 'signature' : guessFieldType(context, text);
+          const context = getContext(text, segment.startIndex, segment.endIndex);
+          const fieldType = guessFieldType(context, text);
           
           fillableAreas.push({
             id: fieldIndex,
@@ -541,15 +405,14 @@ app.post('/process', async (req, res) => {
         const pageHeight = page.getHeight();
         const pageWidth = page.getWidth();
         
-        // 安全座標
+        // 安全座標檢查
         let safeX = Math.max(0, Math.min(area.x, pageWidth - 10));
         let safeY = Math.max(0, Math.min(area.y, pageHeight - 5));
         let safeWidth = Math.max(10, Math.min(area.width, pageWidth - safeX));
         let safeHeight = Math.max(5, Math.min(area.height, pageHeight - safeY));
         
-        // 根據欄位類型創建不同的欄位
+        // 根據欄位類型創建
         if (area.field_type === 'checkbox') {
-          // 創建 Checkbox
           const checkbox = form.createCheckBox(area.field_name);
           
           checkbox.addToPage(page, {
@@ -570,7 +433,6 @@ app.post('/process', async (req, res) => {
           });
           
         } else if (area.field_type === 'radio') {
-          // 創建 Radio Button
           const radioGroup = form.createRadioGroup(area.field_name);
           
           radioGroup.addOptionToPage('option1', page, {
@@ -591,47 +453,30 @@ app.post('/process', async (req, res) => {
           });
           
         } else {
-          // 創建文字欄位（包括簽名欄位）
+          // 文字欄位
           const textField = form.createTextField(area.field_name);
           textField.setText('');
           
           const fontSize = Math.max(6, Math.min(safeHeight * 0.6, 12));
           
-          // 設定 DA
           const acroField = textField.acroField;
           const defaultAppearance = `0 0 0 rg /Helv ${fontSize} Tf`;
           acroField.dict.set(PDFName.of('DA'), PDFString.of(defaultAppearance));
           
-          // 簽名欄位特殊處理
-          if (area.field_type === 'signature') {
-            // 簽名欄位通常比較大
-            safeHeight = Math.max(safeHeight, 30);
-            
-            textField.addToPage(page, {
-              x: safeX,
-              y: safeY,
-              width: safeWidth,
-              height: safeHeight,
-              borderWidth: 1,
-              borderColor: rgb(0, 0, 1), // 藍色邊框標示簽名欄
-              backgroundColor: rgb(0.95, 0.95, 1),
-            });
-          } else {
-            textField.addToPage(page, {
-              x: safeX,
-              y: safeY,
-              width: safeWidth,
-              height: safeHeight,
-              borderWidth: 1,
-              borderColor: rgb(0.7, 0.7, 0.7),
-              backgroundColor: rgb(1, 1, 1),
-            });
-          }
+          textField.addToPage(page, {
+            x: safeX,
+            y: safeY,
+            width: safeWidth,
+            height: safeHeight,
+            borderWidth: 1,
+            borderColor: rgb(0.7, 0.7, 0.7),
+            backgroundColor: rgb(1, 1, 1),
+          });
           
           try {
             textField.updateAppearances(helveticaFont);
           } catch (e) {
-            // 忽略外觀更新錯誤
+            // 忽略
           }
           
           successCount++;
@@ -670,8 +515,7 @@ app.post('/process', async (req, res) => {
         detected_areas: fillableAreas.length,
         created_fields: successCount,
         errors: errorCount,
-        text_fields: createdFields.filter(f => !['checkbox', 'radio', 'signature'].includes(f.type)).length,
-        signature_fields: createdFields.filter(f => f.type === 'signature').length,
+        text_fields: createdFields.filter(f => !['checkbox', 'radio'].includes(f.type)).length,
         checkboxes: createdFields.filter(f => f.type === 'checkbox').length,
         radio_buttons: createdFields.filter(f => f.type === 'radio').length
       },
@@ -691,7 +535,7 @@ app.post('/process', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`PDF Form Generator running on port ${PORT}`);
-  console.log(`Version: 2.0.0`);
+  console.log(`Version: 2.1.0`);
 });
 
 module.exports = app;

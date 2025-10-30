@@ -1,7 +1,7 @@
 {
   "name": "pdf-form-generator",
-  "version": "1.0.0",
-  "description": "Convert underscores in PDF to form fields",
+  "version": "2.1.0",
+  "description": "Convert underscores in PDF to form fields with accurate positioning",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
