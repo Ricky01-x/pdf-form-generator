@@ -261,18 +261,19 @@ app.post('/create-form-fields', async (req, res) => {
     console.log(`PDF URL: ${pdf_url}`);
     console.log(`Total fields to create: ${fillable_areas.length}`);
     
-    // 1. 下載原始 PDF
+    // 下載 PDF
     const response = await fetch(pdf_url);
     if (!response.ok) {
       throw new Error(`Failed to download PDF: ${response.statusText}`);
     }
     
     const pdfBuffer = await response.arrayBuffer();
-    
-    // 2. 載入 PDF
     const pdfDoc = await PDFDocument.load(pdfBuffer);
     const form = pdfDoc.getForm();
     const pages = pdfDoc.getPages();
+    
+    // === 關鍵修正：嵌入字體 ===
+    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
     
     console.log(`PDF has ${pages.length} pages`);
     
@@ -281,7 +282,6 @@ app.post('/create-form-fields', async (req, res) => {
     const errors = [];
     const createdFields = [];
     
-    // 3. 為每個填寫區域創建表單欄位
     for (const area of fillable_areas) {
       try {
         const page = pages[area.page];
@@ -290,26 +290,29 @@ app.post('/create-form-fields', async (req, res) => {
         }
         
         const pageHeight = page.getHeight();
+        const pageWidth = page.getWidth();
         
-        // 創建文字欄位
+        // 安全座標檢查
+        const safeX = Math.max(0, Math.min(area.x, pageWidth - 10));
+        const safeY = Math.max(0, Math.min(area.y, pageHeight - 5));
+        const safeWidth = Math.max(10, Math.min(area.width, pageWidth - safeX));
+        const safeHeight = Math.max(5, Math.min(area.height, pageHeight - safeY));
+        
         const fieldName = area.field_name || `field_${area.id}`;
         const textField = form.createTextField(fieldName);
         
-        // 計算字體大小（框高度的 60-70%）
-        const fontSize = Math.min(area.height * 0.6, area.font_size || 12);
+        const fontSize = Math.max(6, Math.min(safeHeight * 0.6, 12));
         
-        // 設定欄位屬性
+        // === 關鍵修正：設定所有必要屬性 ===
         textField.setText('');
         textField.setFontSize(fontSize);
-        textField.enableReadOnly(false);
-        textField.enableMultiline(false);
+        textField.updateAppearances(font); // ← 這是關鍵！
         
-        // 添加到頁面（使用 Adobe 的 Y 座標系統）
         textField.addToPage(page, {
-          x: area.x,
-          y: area.y,
-          width: area.width,
-          height: area.height,
+          x: safeX,
+          y: safeY,
+          width: safeWidth,
+          height: safeHeight,
           borderWidth: 1,
           borderColor: rgb(0.7, 0.7, 0.7),
           backgroundColor: rgb(1, 1, 1),
@@ -324,12 +327,12 @@ app.post('/create-form-fields', async (req, res) => {
         });
         
         if (successCount <= 10 || successCount % 20 === 0) {
-          console.log(`✓ [${successCount}] Created: ${fieldName} (${area.field_type})`);
+          console.log(`✓ [${successCount}] Created: ${fieldName}`);
         }
         
       } catch (error) {
         errorCount++;
-        const errorMsg = `Failed to create field ${area.field_name}: ${error.message}`;
+        const errorMsg = `${area.field_name}: ${error.message}`;
         errors.push(errorMsg);
         console.error(`✗ ${errorMsg}`);
       }
@@ -339,11 +342,9 @@ app.post('/create-form-fields', async (req, res) => {
     console.log(`Success: ${successCount}`);
     console.log(`Errors: ${errorCount}`);
     
-    // 4. 儲存帶表單的 PDF
     const pdfBytes = await pdfDoc.save();
     const base64Pdf = Buffer.from(pdfBytes).toString('base64');
     
-    // 5. 返回結果
     res.json({
       success: true,
       pdf_base64: base64Pdf,
@@ -437,23 +438,35 @@ app.post('/process', async (req, res) => {
     const form = pdfDoc.getForm();
     const pages = pdfDoc.getPages();
     
+    // === 關鍵：嵌入字體 ===
+    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    
     let successCount = 0;
     const createdFields = [];
     
     for (const area of fillableAreas) {
       try {
         const page = pages[area.page];
+        const pageHeight = page.getHeight();
+        const pageWidth = page.getWidth();
+        
+        const safeX = Math.max(0, Math.min(area.x, pageWidth - 10));
+        const safeY = Math.max(0, Math.min(area.y, pageHeight - 5));
+        const safeWidth = Math.max(10, Math.min(area.width, pageWidth - safeX));
+        const safeHeight = Math.max(5, Math.min(area.height, pageHeight - safeY));
+        
         const textField = form.createTextField(area.field_name);
         
-        const fontSize = Math.min(area.height * 0.6, area.font_size || 12);
+        const fontSize = Math.max(6, Math.min(safeHeight * 0.6, 12));
         textField.setText('');
         textField.setFontSize(fontSize);
+        textField.updateAppearances(font); // ← 關鍵！
         
         textField.addToPage(page, {
-          x: area.x,
-          y: area.y,
-          width: area.width,
-          height: area.height,
+          x: safeX,
+          y: safeY,
+          width: safeWidth,
+          height: safeHeight,
           borderWidth: 1,
           borderColor: rgb(0.7, 0.7, 0.7),
           backgroundColor: rgb(1, 1, 1),
@@ -475,7 +488,6 @@ app.post('/process', async (req, res) => {
     
     console.log(`Created ${successCount} form fields`);
     
-    // Step 3: 儲存並返回
     const pdfBytes = await pdfDoc.save();
     const base64Pdf = Buffer.from(pdfBytes).toString('base64');
     
