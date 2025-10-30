@@ -1,20 +1,18 @@
 const express = require('express');
 const cors = require('cors');
-const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
+const { PDFDocument, rgb, StandardFonts, PDFName, PDFString } = require('pdf-lib');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// 中間件
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// 健康檢查
 app.get('/', (req, res) => {
   res.json({ 
     status: 'ok', 
     service: 'PDF Form Generator',
-    version: '1.0.0',
+    version: '1.1.0',
     endpoints: {
       health: 'GET /',
       detectUnderscores: 'POST /detect-underscores',
@@ -26,7 +24,6 @@ app.get('/', (req, res) => {
 
 // === 工具函數 ===
 
-// 根據字體名稱獲取平均字符寬度係數
 function getFontWidthFactor(fontName) {
   const factors = {
     'Helvetica': 0.55,
@@ -37,26 +34,24 @@ function getFontWidthFactor(fontName) {
     'Courier': 0.6,
     'Courier-Bold': 0.6,
     'Arial': 0.55,
-    'Arial-Bold': 0.58
+    'Arial-Bold': 0.58,
+    'Arial,Bold': 0.58
   };
   
-  // 如果找不到，使用預設值
   for (const key in factors) {
     if (fontName && fontName.includes(key)) {
       return factors[key];
     }
   }
   
-  return 0.55; // 預設值
+  return 0.55;
 }
 
-// 計算字符寬度
 function getCharWidth(fontName, fontSize) {
   const factor = getFontWidthFactor(fontName);
   return fontSize * factor;
 }
 
-// 找出所有連續下劃線段落
 function findUnderscoreSegments(text, minLength = 3) {
   const segments = [];
   let inUnderscore = false;
@@ -64,14 +59,11 @@ function findUnderscoreSegments(text, minLength = 3) {
   
   for (let i = 0; i < text.length; i++) {
     if (text[i] === '_' && !inUnderscore) {
-      // 開始一段下劃線
       inUnderscore = true;
       startIndex = i;
     } else if (text[i] !== '_' && inUnderscore) {
-      // 結束一段下劃線
       inUnderscore = false;
       
-      // 過濾太短的下劃線
       if (i - startIndex >= minLength) {
         segments.push({
           startIndex: startIndex,
@@ -82,7 +74,6 @@ function findUnderscoreSegments(text, minLength = 3) {
     }
   }
   
-  // 處理文字結尾是下劃線的情況
   if (inUnderscore && text.length - startIndex >= minLength) {
     segments.push({
       startIndex: startIndex,
@@ -94,7 +85,6 @@ function findUnderscoreSegments(text, minLength = 3) {
   return segments;
 }
 
-// 獲取上下文（用於生成欄位名稱和問題）
 function getContext(text, startIndex, endIndex) {
   const beforeStart = Math.max(0, startIndex - 100);
   const afterEnd = Math.min(text.length, endIndex + 100);
@@ -105,7 +95,6 @@ function getContext(text, startIndex, endIndex) {
   return { before, after, full: before + ' _____ ' + after };
 }
 
-// 猜測欄位類型
 function guessFieldType(context) {
   const beforeLower = context.before.toLowerCase();
   const afterLower = context.after.toLowerCase();
@@ -114,29 +103,16 @@ function guessFieldType(context) {
   if (combined.includes('date') || combined.includes('day') || combined.includes('month') || combined.includes('year')) {
     return 'date';
   }
-  if (combined.includes('name')) {
-    return 'name';
-  }
-  if (combined.includes('address')) {
-    return 'address';
-  }
-  if (combined.includes('phone') || combined.includes('tel')) {
-    return 'phone';
-  }
-  if (combined.includes('email') || combined.includes('e-mail')) {
-    return 'email';
-  }
-  if (combined.includes('$') || combined.includes('amount') || combined.includes('price')) {
-    return 'currency';
-  }
-  if (combined.includes('signature') || combined.includes('sign')) {
-    return 'signature';
-  }
+  if (combined.includes('name')) return 'name';
+  if (combined.includes('address')) return 'address';
+  if (combined.includes('phone') || combined.includes('tel')) return 'phone';
+  if (combined.includes('email') || combined.includes('e-mail')) return 'email';
+  if (combined.includes('$') || combined.includes('amount') || combined.includes('price')) return 'currency';
+  if (combined.includes('signature') || combined.includes('sign')) return 'signature';
   
   return 'text';
 }
 
-// 生成有意義的欄位名稱
 function generateFieldName(context, index) {
   const words = context.before.split(/\s+/).filter(w => w.length > 2);
   const lastWords = words.slice(-3).join('_').replace(/[^a-zA-Z0-9_]/g, '');
@@ -148,7 +124,8 @@ function generateFieldName(context, index) {
   return `field_${index}`;
 }
 
-// === API 端點 1: 只偵測下劃線（用於測試和檢查） ===
+// === API 端點 ===
+
 app.post('/detect-underscores', async (req, res) => {
   try {
     const { extract_elements } = req.body;
@@ -163,14 +140,11 @@ app.post('/detect-underscores', async (req, res) => {
     const fillableAreas = [];
     let fieldIndex = 1;
     
-    // 遍歷所有 text elements
     for (const element of extract_elements) {
-      // 只處理文字元素
       if (!element.Text || typeof element.Text !== 'string') {
         continue;
       }
       
-      // 檢查是否包含下劃線
       if (!element.Text.includes('_')) {
         continue;
       }
@@ -178,25 +152,21 @@ app.post('/detect-underscores', async (req, res) => {
       const text = element.Text;
       const bounds = element.Bounds;
       const page = element.Page || 0;
-      const fontSize = element.Font?.size || 12;
-      const fontName = element.Font?.name || 'Helvetica';
       
-      // 計算字符寬度
+      // 從 Font 物件取得資訊
+      const fontSize = element.Font?.size || element.TextSize || 12;
+      const fontName = element.Font?.name || element.Font?.family_name || 'Arial';
+      
       const charWidth = getCharWidth(fontName, fontSize);
-      
-      // 找出所有下劃線段落
       const segments = findUnderscoreSegments(text);
       
-      console.log(`Found ${segments.length} underscore segments in: "${text.substring(0, 50)}..."`);
+      console.log(`Found ${segments.length} segments in element on page ${page}`);
       
-      // 為每個下劃線段落創建填寫區域
       for (const segment of segments) {
-        // 計算精確位置
         const startX = bounds[0] + (segment.startIndex * charWidth);
         const width = segment.length * charWidth;
         const height = bounds[3] - bounds[1];
         
-        // 獲取上下文
         const context = getContext(text, segment.startIndex, segment.endIndex);
         const fieldType = guessFieldType(context);
         const fieldName = generateFieldName(context, fieldIndex);
@@ -218,7 +188,7 @@ app.post('/detect-underscores', async (req, res) => {
           underscore_length: segment.length,
           context: context,
           field_type: fieldType,
-          font_size: fontSize * 0.7, // 欄位字體略小於原文
+          font_size: fontSize * 0.7,
           original_text: text
         });
         
@@ -244,129 +214,6 @@ app.post('/detect-underscores', async (req, res) => {
   }
 });
 
-// === API 端點 2: 創建表單欄位 ===
-app.post('/create-form-fields', async (req, res) => {
-  try {
-    const { pdf_url, fillable_areas } = req.body;
-    
-    if (!pdf_url) {
-      return res.status(400).json({ error: 'pdf_url is required' });
-    }
-    
-    if (!fillable_areas || !Array.isArray(fillable_areas)) {
-      return res.status(400).json({ error: 'fillable_areas array is required' });
-    }
-    
-    console.log(`\n=== Creating Form Fields ===`);
-    console.log(`PDF URL: ${pdf_url}`);
-    console.log(`Total fields to create: ${fillable_areas.length}`);
-    
-    // 下載 PDF
-    const response = await fetch(pdf_url);
-    if (!response.ok) {
-      throw new Error(`Failed to download PDF: ${response.statusText}`);
-    }
-    
-    const pdfBuffer = await response.arrayBuffer();
-    const pdfDoc = await PDFDocument.load(pdfBuffer);
-    const form = pdfDoc.getForm();
-    const pages = pdfDoc.getPages();
-    
-    // === 關鍵修正：嵌入字體 ===
-    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-    
-    console.log(`PDF has ${pages.length} pages`);
-    
-    let successCount = 0;
-    let errorCount = 0;
-    const errors = [];
-    const createdFields = [];
-    
-    for (const area of fillable_areas) {
-      try {
-        const page = pages[area.page];
-        if (!page) {
-          throw new Error(`Page ${area.page} not found`);
-        }
-        
-        const pageHeight = page.getHeight();
-        const pageWidth = page.getWidth();
-        
-        // 安全座標檢查
-        const safeX = Math.max(0, Math.min(area.x, pageWidth - 10));
-        const safeY = Math.max(0, Math.min(area.y, pageHeight - 5));
-        const safeWidth = Math.max(10, Math.min(area.width, pageWidth - safeX));
-        const safeHeight = Math.max(5, Math.min(area.height, pageHeight - safeY));
-        
-        const fieldName = area.field_name || `field_${area.id}`;
-        const textField = form.createTextField(fieldName);
-        
-        const fontSize = Math.max(6, Math.min(safeHeight * 0.6, 12));
-        
-        // === 關鍵修正：設定所有必要屬性 ===
-        textField.setText('');
-        textField.setFontSize(fontSize);
-        textField.updateAppearances(font); // ← 這是關鍵！
-        
-        textField.addToPage(page, {
-          x: safeX,
-          y: safeY,
-          width: safeWidth,
-          height: safeHeight,
-          borderWidth: 1,
-          borderColor: rgb(0.7, 0.7, 0.7),
-          backgroundColor: rgb(1, 1, 1),
-        });
-        
-        successCount++;
-        createdFields.push({
-          id: area.id,
-          name: fieldName,
-          type: area.field_type,
-          page: area.page
-        });
-        
-        if (successCount <= 10 || successCount % 20 === 0) {
-          console.log(`✓ [${successCount}] Created: ${fieldName}`);
-        }
-        
-      } catch (error) {
-        errorCount++;
-        const errorMsg = `${area.field_name}: ${error.message}`;
-        errors.push(errorMsg);
-        console.error(`✗ ${errorMsg}`);
-      }
-    }
-    
-    console.log(`\n=== Form Creation Complete ===`);
-    console.log(`Success: ${successCount}`);
-    console.log(`Errors: ${errorCount}`);
-    
-    const pdfBytes = await pdfDoc.save();
-    const base64Pdf = Buffer.from(pdfBytes).toString('base64');
-    
-    res.json({
-      success: true,
-      pdf_base64: base64Pdf,
-      statistics: {
-        total_fields: fillable_areas.length,
-        created: successCount,
-        errors: errorCount
-      },
-      created_fields: createdFields,
-      error_details: errors.length > 0 ? errors : undefined
-    });
-    
-  } catch (error) {
-    console.error('Error creating form fields:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-// === API 端點 3: 完整流程（偵測 + 創建） ===
 app.post('/process', async (req, res) => {
   try {
     const { pdf_url, extract_elements } = req.body;
@@ -394,8 +241,8 @@ app.post('/process', async (req, res) => {
       const text = element.Text;
       const bounds = element.Bounds;
       const page = element.Page || 0;
-      const fontSize = element.Font?.size || 12;
-      const fontName = element.Font?.name || 'Helvetica';
+      const fontSize = element.Font?.size || element.TextSize || 12;
+      const fontName = element.Font?.name || element.Font?.family_name || 'Arial';
       
       const charWidth = getCharWidth(fontName, fontSize);
       const segments = findUnderscoreSegments(text);
@@ -425,6 +272,19 @@ app.post('/process', async (req, res) => {
     
     console.log(`Found ${fillableAreas.length} fillable areas`);
     
+    if (fillableAreas.length === 0) {
+      return res.json({
+        success: true,
+        pdf_base64: null,
+        statistics: {
+          detected_areas: 0,
+          created_fields: 0
+        },
+        fields: [],
+        message: 'No underscores found in PDF'
+      });
+    }
+    
     // Step 2: 創建表單欄位
     console.log('Step 2: Creating form fields...');
     
@@ -435,33 +295,56 @@ app.post('/process', async (req, res) => {
     
     const pdfBuffer = await response.arrayBuffer();
     const pdfDoc = await PDFDocument.load(pdfBuffer);
-    const form = pdfDoc.getForm();
     const pages = pdfDoc.getPages();
     
-    // === 關鍵：嵌入字體 ===
-    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    // 嵌入標準字體（Helvetica 一定可用）
+    const helveticaFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    const form = pdfDoc.getForm();
     
     let successCount = 0;
+    let errorCount = 0;
     const createdFields = [];
+    const errors = [];
     
     for (const area of fillableAreas) {
       try {
         const page = pages[area.page];
+        if (!page) {
+          throw new Error(`Page ${area.page} not found`);
+        }
+        
         const pageHeight = page.getHeight();
         const pageWidth = page.getWidth();
         
-        const safeX = Math.max(0, Math.min(area.x, pageWidth - 10));
-        const safeY = Math.max(0, Math.min(area.y, pageHeight - 5));
-        const safeWidth = Math.max(10, Math.min(area.width, pageWidth - safeX));
-        const safeHeight = Math.max(5, Math.min(area.height, pageHeight - safeY));
+        // 安全座標
+        let safeX = area.x;
+        let safeY = area.y;
+        let safeWidth = area.width;
+        let safeHeight = area.height;
         
-        const textField = form.createTextField(area.field_name);
+        // 確保在頁面範圍內
+        if (safeX < 0) safeX = 0;
+        if (safeY < 0) safeY = 0;
+        if (safeX + safeWidth > pageWidth) safeWidth = pageWidth - safeX;
+        if (safeY + safeHeight > pageHeight) safeHeight = pageHeight - safeY;
+        if (safeWidth < 10) safeWidth = 10;
+        if (safeHeight < 5) safeHeight = 5;
         
-        const fontSize = Math.max(6, Math.min(safeHeight * 0.6, 12));
+        const fieldName = `field_${area.id}`;
+        
+        // 創建文字欄位
+        const textField = form.createTextField(fieldName);
         textField.setText('');
-        textField.setFontSize(fontSize);
-        textField.updateAppearances(font); // ← 關鍵！
         
+        // 計算合適的字體大小
+        const fontSize = Math.max(6, Math.min(safeHeight * 0.6, 12));
+        
+        // === 關鍵修正：直接設定 DA (Default Appearance) ===
+        const acroField = textField.acroField;
+        const defaultAppearance = `0 0 0 rg /Helv ${fontSize} Tf`;
+        acroField.dict.set(PDFName.of('DA'), PDFString.of(defaultAppearance));
+        
+        // 添加到頁面
         textField.addToPage(page, {
           x: safeX,
           y: safeY,
@@ -472,21 +355,37 @@ app.post('/process', async (req, res) => {
           backgroundColor: rgb(1, 1, 1),
         });
         
+        // 嘗試更新外觀（可能失敗但不影響）
+        try {
+          textField.updateAppearances(helveticaFont);
+        } catch (e) {
+          // 忽略外觀更新錯誤
+        }
+        
         successCount++;
         createdFields.push({
           id: area.id,
-          name: area.field_name,
+          name: fieldName,
           type: area.field_type,
           page: area.page,
-          context: area.context.full
+          bounds: [safeX, safeY, safeX + safeWidth, safeY + safeHeight],
+          context: area.context.full.substring(0, 100)
         });
         
+        if (successCount <= 10 || successCount % 50 === 0) {
+          console.log(`✓ [${successCount}/${fillableAreas.length}] ${fieldName}`);
+        }
+        
       } catch (error) {
-        console.error(`Failed to create field ${area.field_name}:`, error.message);
+        errorCount++;
+        errors.push(`field_${area.id}: ${error.message}`);
+        console.error(`✗ field_${area.id}: ${error.message}`);
       }
     }
     
-    console.log(`Created ${successCount} form fields`);
+    console.log(`\n=== Results ===`);
+    console.log(`Created: ${successCount}/${fillableAreas.length}`);
+    console.log(`Errors: ${errorCount}`);
     
     const pdfBytes = await pdfDoc.save();
     const base64Pdf = Buffer.from(pdfBytes).toString('base64');
@@ -496,23 +395,26 @@ app.post('/process', async (req, res) => {
       pdf_base64: base64Pdf,
       statistics: {
         detected_areas: fillableAreas.length,
-        created_fields: successCount
+        created_fields: successCount,
+        errors: errorCount
       },
-      fields: createdFields
+      fields: createdFields,
+      error_details: errors.length > 0 ? errors.slice(0, 10) : undefined
     });
     
   } catch (error) {
     console.error('Error in full process:', error);
     res.status(500).json({
       success: false,
-      error: error.message
+      error: error.message,
+      stack: error.stack
     });
   }
 });
 
 app.listen(PORT, () => {
   console.log(`PDF Form Generator running on port ${PORT}`);
-  console.log(`Version: 1.0.0`);
+  console.log(`Version: 1.1.0`);
 });
 
 module.exports = app;
