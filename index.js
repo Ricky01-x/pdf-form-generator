@@ -12,16 +12,18 @@ app.get('/', (req, res) => {
   res.json({ 
     status: 'ok', 
     service: 'PDF Form Generator',
-    version: '2.1.0',
+    version: '2.3.0',
     features: [
-      'Accurate multi-field positioning',
-      'Multiline text merging',
-      'Checkbox detection',
-      'Improved coordinate calculation'
+      'Smart paragraph merging',
+      'Accurate checkbox positioning',
+      'Multi-field detection',
+      'Currency field detection ($)',
+      'Signature field detection',
+      'Date field detection',
+      'Color-coded field types'
     ],
     endpoints: {
       health: 'GET /',
-      detectUnderscores: 'POST /detect-underscores',
       fullProcess: 'POST /process'
     }
   });
@@ -57,100 +59,113 @@ function getCharWidth(fontName, fontSize) {
   return fontSize * factor;
 }
 
-// === 改進：精確計算字符位置 ===
+// === 精確的字符位置計算 ===
 function calculateCharacterPositions(text, startX, fontName, fontSize) {
   const positions = [];
-  const charWidth = getCharWidth(fontName, fontSize);
+  const baseCharWidth = getCharWidth(fontName, fontSize);
   let currentX = startX;
   
   for (let i = 0; i < text.length; i++) {
     positions.push(currentX);
     
-    // 不同字符可能有不同寬度，但我們用平均值
-    // 特殊處理：空格
-    if (text[i] === ' ') {
-      currentX += charWidth * 0.3; // 空格較窄
+    const char = text[i];
+    
+    if (char === ' ') {
+      currentX += baseCharWidth * 0.3;
+    } else if (char === '(' || char === ')' || char === '[' || char === ']') {
+      currentX += baseCharWidth * 0.4;
+    } else if (char === '☐' || char === '□') {
+      currentX += fontSize * 0.9;
+    } else if (char === '.') {
+      currentX += baseCharWidth * 0.25;
+    } else if (char === ',') {
+      currentX += baseCharWidth * 0.3;
     } else {
-      currentX += charWidth;
+      currentX += baseCharWidth;
     }
   }
   
   return positions;
 }
 
-// === 改進：智能下劃線分段 ===
-function findUnderscoreSegments(text, minLength = 3) {
+// === 改進：智能下劃線分段（支持更短的下劃線）===
+function findUnderscoreSegments(text, minLength = 2) {
   const segments = [];
   let inUnderscore = false;
   let startIndex = 0;
-  let consecutiveNonUnderscore = 0;
+  let underscoreCount = 0;
   
   for (let i = 0; i < text.length; i++) {
     if (text[i] === '_') {
       if (!inUnderscore) {
         inUnderscore = true;
         startIndex = i;
+        underscoreCount = 1;
+      } else {
+        underscoreCount++;
       }
-      consecutiveNonUnderscore = 0;
-    } else {
-      consecutiveNonUnderscore++;
+    } else if (inUnderscore) {
+      const nextChar = text[i];
+      const nextNextChar = i + 1 < text.length ? text[i + 1] : '';
       
-      // 斷點檢測：超過 2 個非下劃線字符 = 新段落
-      // 降低閾值讓分段更敏感
-      if (inUnderscore && consecutiveNonUnderscore >= 2) {
+      const isBreak = 
+        /[a-zA-Z0-9]/.test(nextChar) || 
+        (nextChar === ' ' && nextNextChar === ' ') ||
+        (nextChar === ',' && nextNextChar !== '_');
+      
+      if (isBreak && underscoreCount >= minLength) {
+        segments.push({
+          startIndex: startIndex,
+          endIndex: i - 1,
+          length: underscoreCount
+        });
         inUnderscore = false;
-        
-        const length = i - consecutiveNonUnderscore - startIndex;
-        if (length >= minLength) {
-          segments.push({
-            startIndex: startIndex,
-            endIndex: i - consecutiveNonUnderscore - 1,
-            length: length,
-            type: 'text'
-          });
-        }
+        underscoreCount = 0;
+      } else if (!isBreak) {
+        // 繼續
+      } else {
+        inUnderscore = false;
+        underscoreCount = 0;
       }
     }
   }
   
-  // 處理結尾
-  if (inUnderscore) {
-    const length = text.length - consecutiveNonUnderscore - startIndex;
-    if (length >= minLength) {
-      segments.push({
-        startIndex: startIndex,
-        endIndex: text.length - consecutiveNonUnderscore - 1,
-        length: length,
-        type: 'text'
-      });
-    }
+  if (inUnderscore && underscoreCount >= minLength) {
+    segments.push({
+      startIndex: startIndex,
+      endIndex: text.length - 1,
+      length: underscoreCount
+    });
   }
   
   return segments;
 }
 
-// === Checkbox 識別 ===
+// === Checkbox 精確檢測 ===
 function detectCheckboxes(text) {
   const checkboxes = [];
   
-  const checkboxPatterns = [
-    { regex: /☐/g, type: 'checkbox' },
-    { regex: /□/g, type: 'checkbox' },
-    { regex: /\[\s*\]/g, type: 'checkbox' },
-    { regex: /\(\s*\)/g, type: 'radio' }
+  const patterns = [
+    { regex: /☐/g, type: 'checkbox', symbol: '☐' },
+    { regex: /□/g, type: 'checkbox', symbol: '□' },
+    { regex: /\[\s*\]/g, type: 'checkbox', symbol: '[ ]' },
+    { regex: /\(\s*\)/g, type: 'radio', symbol: '( )' }
   ];
   
-  for (const pattern of checkboxPatterns) {
-    let match;
-    const regex = new RegExp(pattern.regex);
-    while ((match = regex.exec(text)) !== null) {
+  for (const pattern of patterns) {
+    const matches = [...text.matchAll(pattern.regex)];
+    
+    for (const match of matches) {
       checkboxes.push({
         type: pattern.type,
         index: match.index,
-        symbol: match[0]
+        symbol: match[0],
+        length: match[0].length
       });
     }
   }
+  
+  checkboxes.sort((a, b) => a.index - b.index);
   
   return checkboxes;
 }
@@ -189,11 +204,19 @@ function mergeMultilineElements(elements) {
       const yDiff = Math.abs(currBounds[1] - prevBounds[1]);
       const xGap = currBounds[0] - prevBounds[2];
       
-      if (yDiff < 20 && xGap >= 0 && xGap < 100) {
-        currentMerge.Text += ' ' + element.Text;
-        currentMerge.Bounds[2] = currBounds[2];
+      const canMerge = 
+        yDiff < 30 && 
+        xGap >= -10 && 
+        xGap < 150;
+      
+      if (canMerge) {
+        const needSpace = !currentMerge.Text.endsWith(' ') && !element.Text.startsWith(' ');
+        currentMerge.Text += (needSpace ? ' ' : '') + element.Text;
+        
+        currentMerge.Bounds[2] = Math.max(prevBounds[2], currBounds[2]);
         currentMerge.Bounds[3] = Math.max(prevBounds[3], currBounds[3]);
         currentMerge.Bounds[1] = Math.min(prevBounds[1], currBounds[1]);
+        
         continue;
       }
     }
@@ -230,15 +253,30 @@ function getContext(text, startIndex, endIndex) {
   return { before, after, full: before + ' _____ ' + after };
 }
 
+// === 改進：更好的欄位類型識別 ===
 function guessFieldType(context, text = '') {
   const beforeLower = context.before.toLowerCase();
   const afterLower = context.after.toLowerCase();
   const combined = (beforeLower + ' ' + afterLower + ' ' + text).toLowerCase();
   
-  // 移除簽名欄位自動識別
+  // 簽名欄位優先級最高
+  if (combined.includes('(sign)') || combined.includes('signature:') || 
+      combined.includes('signed by') || combined.includes('sign:') ||
+      combined.includes('by (sign)') || combined.includes('signature')) {
+    return 'signature';
+  }
   
+  // 金額欄位（$ 符號前後）
+  if (combined.includes('$') || combined.includes('amount of') || 
+      combined.includes('sum of') || combined.includes('price') ||
+      combined.includes('earnest money') || combined.includes('deposit')) {
+    return 'currency';
+  }
+  
+  // 日期欄位
   if (combined.includes('date') || combined.includes('day') || 
-      combined.includes('month') || combined.includes('year')) {
+      combined.includes('month') || combined.includes('year') ||
+      combined.includes('this _____ day') || combined.includes('made this day')) {
     return 'date';
   }
   
@@ -246,7 +284,6 @@ function guessFieldType(context, text = '') {
   if (combined.includes('address')) return 'address';
   if (combined.includes('phone') || combined.includes('tel')) return 'phone';
   if (combined.includes('email') || combined.includes('e-mail')) return 'email';
-  if (combined.includes('$') || combined.includes('amount') || combined.includes('price')) return 'currency';
   
   return 'text';
 }
@@ -260,10 +297,10 @@ function generateFieldName(context, index, fieldType) {
   const lastWords = words.slice(-3).join('_').replace(/[^a-zA-Z0-9_]/g, '');
   
   if (lastWords) {
-    return `field_${index}_${lastWords}`;
+    return `${fieldType}_${index}_${lastWords}`;
   }
   
-  return `field_${index}`;
+  return `${fieldType}_${index}`;
 }
 
 // === API 端點 ===
@@ -298,7 +335,6 @@ app.post('/process', async (req, res) => {
       const fontSize = element.Font?.size || element.TextSize || 12;
       const fontName = element.Font?.name || element.Font?.family_name || 'Arial';
       
-      // === 關鍵改進：計算每個字符的精確位置 ===
       const charPositions = calculateCharacterPositions(text, bounds[0], fontName, fontSize);
       const charWidth = getCharWidth(fontName, fontSize);
       
@@ -306,9 +342,8 @@ app.post('/process', async (req, res) => {
       const checkboxes = detectCheckboxes(text);
       
       for (const checkbox of checkboxes) {
-        // 使用精確的字符位置
         const startX = charPositions[checkbox.index] || bounds[0];
-        const size = fontSize * 0.9;
+        const size = fontSize * 0.85;
         
         fillableAreas.push({
           id: fieldIndex,
@@ -321,7 +356,7 @@ app.post('/process', async (req, res) => {
           field_type: checkbox.type,
           context: {
             before: text.substring(Math.max(0, checkbox.index - 50), checkbox.index),
-            after: text.substring(checkbox.index + checkbox.symbol.length, Math.min(text.length, checkbox.index + 100)),
+            after: text.substring(checkbox.index + checkbox.length, Math.min(text.length, checkbox.index + 100)),
             full: text
           },
           font_size: fontSize
@@ -330,15 +365,14 @@ app.post('/process', async (req, res) => {
         fieldIndex++;
       }
       
-      // 檢測下劃線
+      // 檢測下劃線（最少 2 個下劃線）
       if (text.includes('_')) {
-        const segments = findUnderscoreSegments(text);
+        const segments = findUnderscoreSegments(text, 2);
         
         for (const segment of segments) {
-          // === 關鍵改進：使用精確的字符位置 ===
           const startX = charPositions[segment.startIndex] || bounds[0];
           const endX = charPositions[segment.endIndex] || (startX + segment.length * charWidth);
-          const width = endX - startX;
+          const width = Math.max(endX - startX, 20);
           
           const context = getContext(text, segment.startIndex, segment.endIndex);
           const fieldType = guessFieldType(context, text);
@@ -367,10 +401,7 @@ app.post('/process', async (req, res) => {
       return res.json({
         success: true,
         pdf_base64: null,
-        statistics: {
-          detected_areas: 0,
-          created_fields: 0
-        },
+        statistics: { detected_areas: 0, created_fields: 0 },
         fields: [],
         message: 'No form fields found in PDF'
       });
@@ -405,13 +436,11 @@ app.post('/process', async (req, res) => {
         const pageHeight = page.getHeight();
         const pageWidth = page.getWidth();
         
-        // 安全座標檢查
         let safeX = Math.max(0, Math.min(area.x, pageWidth - 10));
         let safeY = Math.max(0, Math.min(area.y, pageHeight - 5));
         let safeWidth = Math.max(10, Math.min(area.width, pageWidth - safeX));
         let safeHeight = Math.max(5, Math.min(area.height, pageHeight - safeY));
         
-        // 根據欄位類型創建
         if (area.field_type === 'checkbox') {
           const checkbox = form.createCheckBox(area.field_name);
           
@@ -429,7 +458,9 @@ app.post('/process', async (req, res) => {
             id: area.id,
             name: area.field_name,
             type: 'checkbox',
-            page: area.page
+            page: area.page,
+            x: safeX,
+            y: safeY
           });
           
         } else if (area.field_type === 'radio') {
@@ -449,7 +480,9 @@ app.post('/process', async (req, res) => {
             id: area.id,
             name: area.field_name,
             type: 'radio',
-            page: area.page
+            page: area.page,
+            x: safeX,
+            y: safeY
           });
           
         } else {
@@ -463,21 +496,40 @@ app.post('/process', async (req, res) => {
           const defaultAppearance = `0 0 0 rg /Helv ${fontSize} Tf`;
           acroField.dict.set(PDFName.of('DA'), PDFString.of(defaultAppearance));
           
+          // === 根據欄位類型設置顏色 ===
+          let borderColor;
+          let backgroundColor;
+          
+          if (area.field_type === 'signature') {
+            borderColor = rgb(0, 0, 1);           // 藍色
+            backgroundColor = rgb(0.9, 0.9, 1);
+          } else if (area.field_type === 'currency') {
+            borderColor = rgb(0, 0.6, 0);         // 綠色
+            backgroundColor = rgb(0.9, 1, 0.9);
+          } else if (area.field_type === 'date') {
+            borderColor = rgb(0.6, 0, 0.6);       // 紫色
+            backgroundColor = rgb(1, 0.9, 1);
+          } else if (area.field_type === 'name') {
+            borderColor = rgb(0.8, 0.4, 0);       // 橘色
+            backgroundColor = rgb(1, 0.95, 0.9);
+          } else {
+            borderColor = rgb(0.7, 0.7, 0.7);     // 灰色
+            backgroundColor = rgb(1, 1, 1);
+          }
+          
           textField.addToPage(page, {
             x: safeX,
             y: safeY,
             width: safeWidth,
             height: safeHeight,
             borderWidth: 1,
-            borderColor: rgb(0.7, 0.7, 0.7),
-            backgroundColor: rgb(1, 1, 1),
+            borderColor: borderColor,
+            backgroundColor: backgroundColor,
           });
           
           try {
             textField.updateAppearances(helveticaFont);
-          } catch (e) {
-            // 忽略
-          }
+          } catch (e) {}
           
           successCount++;
           createdFields.push({
@@ -485,19 +537,21 @@ app.post('/process', async (req, res) => {
             name: area.field_name,
             type: area.field_type,
             page: area.page,
-            bounds: [safeX, safeY, safeX + safeWidth, safeY + safeHeight],
+            x: safeX,
+            y: safeY,
+            width: safeWidth,
             context: typeof area.context === 'object' ? area.context.full?.substring(0, 100) : ''
           });
         }
         
-        if (successCount <= 10 || successCount % 50 === 0) {
-          console.log(`✓ [${successCount}/${fillableAreas.length}] ${area.field_name} (${area.field_type})`);
+        if (successCount % 50 === 0 || successCount <= 5) {
+          console.log(`  ✓ Created ${successCount}/${fillableAreas.length}`);
         }
         
       } catch (error) {
         errorCount++;
         errors.push(`${area.field_name}: ${error.message}`);
-        console.error(`✗ ${area.field_name}: ${error.message}`);
+        console.error(`  ✗ ${area.field_name}: ${error.message}`);
       }
     }
     
@@ -508,6 +562,17 @@ app.post('/process', async (req, res) => {
     const pdfBytes = await pdfDoc.save();
     const base64Pdf = Buffer.from(pdfBytes).toString('base64');
     
+    // 統計各類型欄位
+    const fieldStats = {
+      text: createdFields.filter(f => f.type === 'text').length,
+      signature: createdFields.filter(f => f.type === 'signature').length,
+      currency: createdFields.filter(f => f.type === 'currency').length,
+      date: createdFields.filter(f => f.type === 'date').length,
+      name: createdFields.filter(f => f.type === 'name').length,
+      checkboxes: createdFields.filter(f => f.type === 'checkbox').length,
+      radio_buttons: createdFields.filter(f => f.type === 'radio').length
+    };
+    
     res.json({
       success: true,
       pdf_base64: base64Pdf,
@@ -515,9 +580,7 @@ app.post('/process', async (req, res) => {
         detected_areas: fillableAreas.length,
         created_fields: successCount,
         errors: errorCount,
-        text_fields: createdFields.filter(f => !['checkbox', 'radio'].includes(f.type)).length,
-        checkboxes: createdFields.filter(f => f.type === 'checkbox').length,
-        radio_buttons: createdFields.filter(f => f.type === 'radio').length
+        ...fieldStats
       },
       fields: createdFields,
       error_details: errors.length > 0 ? errors.slice(0, 10) : undefined
@@ -535,7 +598,7 @@ app.post('/process', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`PDF Form Generator running on port ${PORT}`);
-  console.log(`Version: 2.1.0`);
+  console.log(`Version: 2.3.0`);
 });
 
 module.exports = app;
