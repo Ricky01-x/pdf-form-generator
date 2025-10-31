@@ -1,7 +1,7 @@
 {
   "name": "pdf-form-generator",
-  "version": "2.3.0",
-  "description": "PDF form generator with improved field detection and color coding",
+  "version": "2.3.1",
+  "description": "PDF form generator with improved positioning and simplified color system",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
